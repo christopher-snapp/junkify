@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+#
+# Copyright (C) 2012, Christopher A. Snapp <snappca@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# number of files to be generated
+total_files=500
+
+# number of concurrent writers
+concurrency=10
+
+# maximum number of sub-directories
+max_dir_depth=7
+
+# maximum number of sibling directories
+max_dir_siblings=7
+
+# minimum number of characters within a file or directory name
+min_name_length=3
+
+# maximum number of characters within a file or directory name
+max_name_length=10
+
+# ratio of directories to files
+dir_ratio='0.1028893320'
+
+# ratio of file sizes
+file_ratio_100GB='0.0000027797'
+file_ratio_10GB='0.0000180849'
+file_ratio_1GB='0.0001770990'
+file_ratio_100MB='0.0010082720'
+file_ratio_10MB='0.0121882332'
+file_ratio_1MB='0.0510607629'
+file_ratio_100KB='0.0944927884'
+file_ratio_10KB='0.2361982542'
+file_ratio_1KB='0.3734285539'
+file_ratio_lt_1KB='0.2314251210'
+
+
+#### STOP! DON'T EDIT ANY VARIABLES BELOW HERE ####
+
+
+# dependency check
+[[ "$(which openssl)" ]] || { echo 'ERROR: openssl command is not available'; exit 1; }
+[[ -r /usr/share/dict/words ]] || { echo 'ERROR: cannot read /usr/share/dict/words'; exit 1; }
+
+prog='junkify'
+version=12.12
+
+max_words=$(wc -l /usr/share/dict/words | cut -d' ' -f1)
+
+# generate a random name
+generate_name () {
+    word_num=$(shuf -n 1 -i 0-${max_words})
+    sed -n "${word_num}p" /usr/share/dict/words | grep -o '^[a-zA-Z0-9]*'
+}
+
+# generate directory tree at provided base dir
+#
+# $1 - base directory
+generate_dir_tree () {
+    base_dir=$1
+    grep -q "$PWD" <<<"$base_dir" || base_dir="${PWD}${1}"
+    current_depth=$(echo "$base_dir" | tr -dc '/' | wc -c)
+    max_depth=$((max_dir_depth-current_depth))
+    [[ $max_depth -lt 0 ]] && max_depth=0
+    siblings=$(shuf -n 1 -i 0-${max_dir_siblings})
+
+    for i in $(seq 1 $siblings); do
+        dir_name="$(generate_name)"
+        directories+=("${base_dir}/${dir_name}")
+
+        for j in $(seq 0 $(shuf -n 1 -i 0-${max_depth})); do
+            dir_name="${dir_name}/$(generate_name)"
+            directories+=("${base_dir}/${dir_name}")
+        done
+    done
+}
+
+# print error message followed by usage and exit
+error () {
+    echo -e "\nERROR: $1\n" >&2
+    print_usage >&2
+    exit 1
+}
+
+# print command usage
+print_usage () {
+    cat <<EOF
+Usage: $prog [-h] [--help] [-w writers] [-d max_subdirectories] [-f number_files] [-l min_name_length] [-L max_name_length] [-s max_siblings] [-w writers]
+
+Options:
+    -d  maximum number of sub-directories
+
+    -f  number of files to generate
+
+    -h, --help  display this help and exit
+
+    -l  minimum number of characters within a file or directory name
+
+    -L  maximum number of characters within a file or directory name
+
+    -s  maximum number of sibling directories
+
+    -w  number of concurrent writers
+
+    -v  display version information and exit
+EOF
+}
+
+# process arguments
+for arg in $@; do
+    case "$arg" in
+        -d)
+            max_dir_depth='-d'
+            ;;
+        -d[0-9]*)
+            max_dir_depth=${arg#-d}
+            ;;
+        -f)
+            total_files='-f'
+            ;;
+        -f[0-9]*)
+            total_files=${arg#-f}
+            ;;
+        -h | --help)
+            print_usage
+            exit 0
+            ;;
+        -l)
+            min_name_length='-l'
+            ;;
+        -l[0-9]*)
+            min_name_length=${arg#-l}
+            ;;
+        -L)
+            max_name_length='-L'
+            ;;
+        -L[0-9]*)
+            max_name_length=${arg#-L}
+            ;;
+        -s)
+            max_dir_siblings='-s'
+            ;;
+        -s[0-9]*)
+            max_dir_siblings=${arg#-s}
+            ;;
+        -v)
+            echo $prog $version
+            exit 0
+            ;;
+        -w)
+            concurrency='-w'
+            ;;
+        -w[0-9]*)
+            concurrency=${arg#-w}
+            ;;
+        *)
+        if [[ "$max_dir_depth" == '-d' ]] && [[ "$arg" =~ ^[0-9]+$ ]]; then
+            max_dir_depth=$arg
+        elif [[ "$total_files" == '-f' ]] && [[ "$arg" =~ ^[0-9]+$ ]]; then
+            total_files=$arg
+        elif [[ "$min_name_length" == '-l' ]] && [[ "$arg" =~ ^[0-9]+$ ]]; then
+            min_name_length=$arg
+        elif [[ "$max_name_length" == '-L' ]] && [[ "$arg" =~ ^[0-9]+$ ]]; then
+            max_name_length=$arg
+        elif [[ "$max_dir_siblings" == '-s' ]] && [[ "$arg" =~ ^[0-9]+$ ]]; then
+            max_dir_siblings=$arg
+        elif [[ "$concurrency" == '-w' ]] && [[ "$arg" =~ ^[0-9]+$ ]]; then
+            concurrency=$arg
+        fi
+    esac
+done
+
+# sanity check
+[[ "$max_dir_depth" =~ ^[0-9]+$ ]] || error 'maximum directory depth must be an integer'
+[[ $max_dir_depth -ge 1 ]] || error 'maximum directory depth must be greater than or equal to 1'
+[[ "$total_files" =~ ^[0-9]+$ ]] || error 'number of files must be an integer'
+[[ $total_files -ge $concurrency ]] || error 'number of files must be greater than or equal to concurrency setting'
+[[ "$min_name_length" =~ ^[0-9]+$ ]] || error 'minimum name length must be an integer'
+[[ $min_name_length -ge 1 ]] || error 'minimum name length must be greater than or equal to 1'
+[[ "$max_name_length" =~ ^[0-9]+$ ]] || error 'maximum name length must be an integer'
+[[ $max_name_length -ge 1 ]] || error 'maximum name length must be greater than or equal to 1'
+[[ "$max_dir_siblings" =~ ^[0-9]+$ ]] || error 'maximum directory siblings must be an integer'
+[[ $max_dir_siblings -ge 0 ]] || error 'maximum directory siblings must be greater than or equal to 0'
+[[ $max_name_length -ge $min_name_length ]] || error 'maximum name length must be greater than or equal to minimum name length'
+
+# total number of directories to be generated
+total_dirs=$(bc -q <<<"($total_files * $dir_ratio)/1")
+
+# array of directories where files will be created
+directories=( )
+
+# number of file sizes left to write
+files=( )
+files[107374182400]=$(bc -q <<<"($total_files * $file_ratio_100GB)/1")
+files[10737418240]=$(bc -q <<<"($total_files * $file_ratio_10GB)/1")
+files[1073741824]=$(bc -q <<<"($total_files * $file_ratio_1GB)/1")
+files[104857600]=$(bc -q <<<"($total_files * $file_ratio_100MB)/1")
+files[10485760]=$(bc -q <<<"($total_files * $file_ratio_10MB)/1")
+files[1048576]=$(bc -q <<<"($total_files * $file_ratio_1MB)/1")
+files[102400]=$(bc -q <<<"($total_files * $file_ratio_100KB)/1")
+files[10240]=$(bc -q <<<"($total_files * $file_ratio_10KB)/1")
+files[1024]=$(bc -q <<<"($total_files * $file_ratio_1KB)/1")
+files[1]=$(bc -q <<<"($total_files * $file_ratio_lt_1KB)/1")
+
+# ceiling ranges
+file_ceiling[107374182400]=107374182400
+file_ceiling[10737418240]=107374182400
+file_ceiling[1073741824]=10737418240
+file_ceiling[104857600]=1073741824
+file_ceiling[10485760]=104857600
+file_ceiling[1048576]=10485760
+file_ceiling[102400]=1048576
+file_ceiling[10240]=102400
+file_ceiling[1024]=10240
+file_ceiling[1]=1024
+
+# human readable sizes
+file_sizes[107374182400]='100G'
+file_sizes[10737418240]='10G'
+file_sizes[1073741824]='1G'
+file_sizes[104857600]='100M'
+file_sizes[10485760]='10M'
+file_sizes[1048576]='1M'
+file_sizes[102400]='100K'
+file_sizes[10240]='10K'
+file_sizes[1024]='1K'
+file_sizes[1]='lt1K'
+
+# adjust max directory depth for current path
+max_dir_depth=$((max_dir_depth+`readlink -f . | tr -dc '/' | wc -c`))
+
+echo -e '\nnumber of directories to be created:'
+echo " $total_dirs"
+
+echo -e '\nnumber of files to be created:'
+echo "100G    ${files[107374182400]}"
+echo " 10G    ${files[10737418240]}"
+echo "  1G    ${files[1073741824]}"
+echo "100M    ${files[104857600]}"
+echo " 10M    ${files[10485760]}"
+echo "  1M    ${files[1048576]}"
+echo "100K    ${files[102400]}"
+echo " 10K    ${files[10240]}"
+echo "  1K    ${files[1024]}"
+echo " <1K    ${files[1]}"
+
+# prompt user to continue
+echo -e -n "\nAre you sure you want to continue [y/N]? "
+read continue
+
+if [[ ! "$continue" =~ y|Y ]]; then
+    echo 'Aborted!'
+    exit 0
+fi
+
+# generate directory trees
+echo -en '\ngenerating directory structure (this takes awhile) ... '
+while [[ ${#directories[*]} -lt $total_dirs ]]; do
+    if [[ ${#directories[*]} -eq 0 ]]; then
+        base_dir=$(readlink -f .)
+    else
+        base_dir=${directories[$(shuf -n 1 -i 0-${#directories[*]})]}
+    fi
+    generate_dir_tree $base_dir
+done
+echo 'DONE'
+
+# ensure our total number of directories does not exceed defined maximum
+directories=( ${directories[@]:0:$((total_dirs))} )
+
+# create files
+echo -n 'creating files ................... '
+while [[ ${#files[*]} -ne 0 ]]; do
+    running=$(jobs -p | wc -l)
+
+    # spawn job if concurrency hasn't been exceeded
+    if [[ $running -le $concurrency ]]; then
+        # randomly select file size
+        key=$(shuf -n 1 <<<"$(echo ${!files[@]} | tr ' ' '\n')")
+
+        if [[ ${files[$key]} -ne 0 ]]; then
+            file_name="$(generate_name)"
+
+            # randomly select directory
+            target_dir=
+            while [[ -z "$target_dir" ]]; do
+                target_dir=${directories[$(shuf -n 1 -i 0-${#directories[*]})]}
+            done
+            mkdir -p "${target_dir}"
+
+            # randomly select file + size
+            files[$key]="$((files[$key]-1))"
+            size=$(shuf -n 1 -i ${key}-${file_ceiling[$key]})
+
+            echo "# of ${file_sizes[$key]} left: ${files[$key]}   creating: $((size+16))   ${target_dir}/${file_name}-${file_sizes[$key]}.bin"
+
+            # write file contents in background
+            { head -c $size /dev/zero | openssl enc -aes256 -nosalt -pass pass:"$(dd if=/dev/urandom bs=128 count=1 2>/dev/null | base64)" > "${target_dir}/${file_name}-${file_sizes[$key]}.bin"; } &
+        else
+            unset files[$key]
+        fi
+    else
+        sleep 1
+    fi
+done
+wait
+echo -e 'DONE\n'
